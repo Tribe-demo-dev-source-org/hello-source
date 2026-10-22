@@ -1,0 +1,47 @@
+name: Doorbell
+
+# SOURCE repo only ("Tribe"). Doc 3.7.
+# Rings the destination's Pull workflow after every merge to main and every release
+# cut. It sends a repository_dispatch with no payload: no code, no SHA. The
+# destination ignores the payload and fetches from this repo itself.
+#
+# The Doorbell App key lives in the 'doorbell' Environment, which only main can use
+# (doc 2.7). The token is narrowed to one repository and contents:write, which is
+# the minimum POST /dispatches needs.
+#
+# In MetLife's real setup this job runs on a GitHub-hosted larger runner with a static
+# IP range (doc section 7). The demo orgs are on the free plan with no IP allow list,
+# so ubuntu-latest is enough here.
+
+on:
+  push:
+    branches: [main]
+  # cut-release.yml calls this. A tag pushed with GITHUB_TOKEN raises no event.
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  ring:
+    name: Ring the doorbell
+    if: github.repository == format('{0}/{1}', vars.SOURCE_OWNER, vars.SOURCE_REPO)
+    runs-on: ubuntu-latest
+    environment: doorbell
+    steps:
+      - name: Mint a doorbell token (one repo, contents:write only)
+        id: doorbell
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.DOORBELL_CLIENT_ID }}
+          private-key: ${{ secrets.DOORBELL_PRIVATE_KEY }}
+          owner: ${{ vars.DEST_OWNER }}
+          repositories: ${{ vars.DEST_REPO }}
+          permission-contents: write
+
+      - name: Send repository_dispatch (event_type=mirror-pull, no payload)
+        env:
+          GH_TOKEN: ${{ steps.doorbell.outputs.token }}
+          DEST: ${{ vars.DEST_OWNER }}/${{ vars.DEST_REPO }}
+        run: |
+          gh api --method POST "repos/${DEST}/dispatches" -f event_type=mirror-pull
+          echo "### Doorbell rang ${DEST} (mirror-pull)" >> "$GITHUB_STEP_SUMMARY"

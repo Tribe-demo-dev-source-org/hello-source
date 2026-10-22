@@ -1,0 +1,79 @@
+name: Release Branch
+
+# DESTINATION repo only ("MetLife"). Doc 3.4.
+# Runs the ancestry gate: the tag's commit must be identical to main or behind it.
+# Then it cuts the immutable release/<tag>-<sha7> branch and dispatches the prod
+# deploy. Production deploys only from these branches (prod Environment policy).
+# Real design: a Veracode Policy Scan of the release branch also runs here, for the
+# M4/M6 milestone record (doc 4.3). The demo leaves it out.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, e.g. v1.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # dispatch the prod deploy
+
+jobs:
+  cut:
+    name: Ancestry gate and cut release branch
+    if: github.repository == format('{0}/{1}', vars.DEST_OWNER, vars.DEST_REPO) && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint an Ingest App token
+        id: ingest
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.INGEST_CLIENT_ID }}
+          private-key: ${{ secrets.INGEST_PRIVATE_KEY }}
+          owner: ${{ vars.DEST_OWNER }}
+          repositories: ${{ vars.DEST_REPO }}
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.ingest.outputs.token }}
+
+      - name: Ancestry gate, then cut the branch
+        id: cut
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+$ ]] || { echo "::error::tag must look like v1.0"; exit 1; }
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          sha="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::${TAG} (${sha}) is not on scanned main. Refusing."
+            exit 1
+          fi
+          branch="release/${TAG}-${sha:0:7}"
+          if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null; then
+            echo "${branch} already exists (release branches are immutable). Not re-cutting."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            git push origin "${sha}:refs/heads/${branch}"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          echo "### Release branch \`${branch}\` (${TAG} at \`${sha}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch the prod deploy from the release branch
+        if: steps.cut.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.cut.outputs.branch }}
+        run: gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f env=prod

@@ -1,0 +1,99 @@
+name: Scan and Promote
+
+# DESTINATION repo only ("MetLife"). Doc 3.2.
+# Started only by workflow_dispatch, against main, with the commit SHA as input.
+# The workflow definition and the scanner come from the trusted, already-scanned
+# main. The candidate commit is data: it is scanned, never checked out or executed.
+# If the gate passes, main fast-forwards to the commit and the QA deploy starts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA on incoming/main
+        required: true
+        type: string
+
+concurrency:
+  group: scan-and-promote
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Veracode gate (demo stand-in)
+    if: github.repository == format('{0}/{1}', vars.DEST_OWNER, vars.DEST_REPO) && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the SHA
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 lowercase hex characters"; exit 1; }
+          git merge-base --is-ancestor "$SHA" refs/remotes/origin/incoming/main \
+            || { echo "::error::$SHA is not on incoming/main"; exit 1; }
+          git merge-base --is-ancestor refs/remotes/origin/main "$SHA" \
+            || { echo "::error::$SHA is not a fast-forward of main"; exit 1; }
+
+      # Real design: Veracode Pipeline Scan (static) plus SCA. Block on any open
+      # Critical (Very High) or High finding (doc 4.3).
+      - name: Veracode gate (demo stand-in)
+        env:
+          SHA: ${{ inputs.sha }}
+        run: bash scripts/veracode-standin.sh "$SHA"
+
+  promote:
+    name: Fast-forward main and deploy QA
+    needs: scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # dispatch deploy and mirror-pull with GITHUB_TOKEN
+    steps:
+      - name: Mint an Ingest App token
+        id: ingest
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.INGEST_CLIENT_ID }}
+          private-key: ${{ secrets.INGEST_PRIVATE_KEY }}
+          owner: ${{ vars.DEST_OWNER }}
+          repositories: ${{ vars.DEST_REPO }}
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.ingest.outputs.token }}
+
+      # --ff-only creates no commit, so signatures, linear history and
+      # no-force-push rules all hold (doc 4.4).
+      - name: Fast-forward main to the scanned commit
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          git merge --ff-only "$SHA"
+          git push origin HEAD:refs/heads/main
+          echo "### main fast-forwarded to \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch the QA deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main -f env=qa
+
+      # main has moved, so a release tag that was waiting may now be publishable.
+      - name: Re-dispatch Mirror Pull to publish pending tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run mirror-pull.yml --repo "$GITHUB_REPOSITORY" --ref main

@@ -1,0 +1,66 @@
+name: Cut Release
+
+# SOURCE repo only ("Tribe"). Doc 3.6.
+# Tags main's tip as vX.Y, then rings the doorbell. If main's tip already carries a
+# vX.Y tag, the workflow skips both steps.
+# In the real design this runs on a weekday schedule, with manual runs for urgent
+# releases. The demo uses manual runs only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, e.g. v1.0
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  tag:
+    name: Tag main
+    if: github.repository == format('{0}/{1}', vars.SOURCE_OWNER, vars.SOURCE_REPO) && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tagged: ${{ steps.tag.outputs.tagged }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create and push the tag
+        id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="$INPUT_VERSION"
+          [[ "$v" =~ ^v?[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like v1.0"; exit 1; }
+          [[ "$v" == v* ]] || v="v$v"
+          existing="$(git tag --points-at HEAD --list 'v*')"
+          if [ -n "$existing" ]; then
+            echo "main tip is already tagged ($existing). Skipping."
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/$v" >/dev/null; then
+            echo "::error::$v already exists on another commit"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$v" -m "Release $v"
+          git push origin "refs/tags/$v"
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "### Tagged $v at $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  ring:
+    name: Ring the doorbell
+    needs: tag
+    if: needs.tag.outputs.tagged == 'true'
+    permissions: {}
+    uses: ./.github/workflows/doorbell.yml
