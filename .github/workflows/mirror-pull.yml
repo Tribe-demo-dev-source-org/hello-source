@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       rescan:
-        description: Dispatch change the scan even if incoming/main did not move
+        description: Dispatch the scan even if incoming/main did not move
         type: boolean
         default: false
   # Every 30 minutes, weekdays, roughly 08:00-19:00 US Eastern.
