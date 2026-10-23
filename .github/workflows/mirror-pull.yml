@@ -29,8 +29,8 @@ on:
         default: false
   # Every 30 minutes, weekdays, roughly 08:00-19:00 US Eastern.
   # Comment this out to keep the Actions tab quiet while recording.
-  schedule:
-    - cron: "*/30 12-23 * * 1-5"
+  #schedule:
+  #  - cron: "*/30 12-23 * * 1-5"
 
 concurrency:
   group: mirror-pull
