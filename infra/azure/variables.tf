@@ -21,7 +21,7 @@ variable "app_version" {
 variable "site_resource_group" {
   description = "Resource group of the site storage accounts."
   type        = string
-  default     = "metlife-demo-codepromo"
+  default     = "joshwack-testing"
 }
 
 variable "site_storage_account_name" {
